@@ -77,10 +77,13 @@ def skinning(x, w, tfs, tfs_c_inv):
         tfs_c_inv (tensor): bone transformation matrices. shape: [J, D+1, D+1]
     Returns:
         x (tensor): skinned points. shape: [B, N, D]
+        第一个张量tfs，其形状是(batch_size, N, I, J)。
+        第二个张量tfs_c_inv，其形状是(N, J, K)。
+        通过torch.einsum实现了两个张量的点积运算
     """
     tfs = torch.einsum('bnij,njk->bnik', tfs, tfs_c_inv)
 
-    x_h = F.pad(x, (0, 1), value=1.0)
+    x_h = F.pad(x, (0, 1), value=1.0)  # 在张量x的维度1（通常是行）的两侧各填充0个单位和1个单位。也就是说，只在每行的右侧进行填充。
     x_h = torch.einsum("bpn,bnij,bpj->bpi", w, tfs, x_h)
 
     return x_h[:, :, :3]
@@ -93,16 +96,20 @@ def deforming(vertices_garment_T, faces, pose, beta, latent_code, embedder, mode
     # beta - (1, 10) 
     # latent_code - (1, 32) 
 
+    # 所有点的数量
     num_v = vertices_garment_T.shape[0]
+    # 所有点的集合(1, #P, 3)
     points = vertices_garment_T.unsqueeze(0)
+    # 所有点的embedding（1, #P, 3）数值5倍再压缩
     points_embed = embedder(points*5)
-        
+    # 按照点的个数，倍数latent，变为(1, #P, 32)
     latent_code = latent_code.unsqueeze(1).repeat(1, num_v, 1)
+    # garment embed + latent_code = (1. #P, 3+32)
     points_embed = torch.cat((points_embed, latent_code), dim=-1)
         
     pose_input = pose.unsqueeze(1).repeat(1, num_v, 1)
     beta_input = beta.unsqueeze(1).repeat(1, num_v, 1)
-
+    # lbs = pose + beta
     input_lbs_deform = torch.cat((pose_input, beta_input), dim=-1)
     
     x_deform = model_lbs_deform(input_lbs_deform, points_embed)/100
@@ -110,8 +117,10 @@ def deforming(vertices_garment_T, faces, pose, beta, latent_code, embedder, mode
 
     input_lbs_shape = torch.cat((points, beta_input), dim=-1)
     delta_shape_pred = model_lbs_shape(input_lbs_shape)
+    # garment = points + x_deform(服装变形) + delta_shape_pred(动作变形)
     garment_deform += delta_shape_pred
 
+    # skining
     lbs_weight = model_lbs(points)
     lbs_weight = lbs_weight.softmax(dim=-1)
     garment_skinning = skinning(garment_deform, lbs_weight, tfs, tfs_c_inv)
@@ -119,6 +128,7 @@ def deforming(vertices_garment_T, faces, pose, beta, latent_code, embedder, mode
     verts_deformed = garment_skinning.squeeze() # (#P, 3) 
     verts_deformed_np = verts_deformed.detach().cpu().numpy()
 
+    # 点左边的变形，面的拓扑关系保持不变
     cloth_mesh = trimesh.Trimesh(verts_deformed_np, faces)
     return verts_deformed, cloth_mesh
 
@@ -172,6 +182,21 @@ def deforming_layer(vertices_garment_T, faces, pose, beta, latent_code, latent_c
     return verts_deformed, verts_deformed_layer, cloth_mesh, cloth_mesh_layer
 
 def draping(vertices_Ts, faces_garments, latent_codes, pose, beta, models, smpl_server, tfs_c_inv):
+    """
+
+    Args:
+        vertices_Ts: top and bottom vertices
+        faces_garments: top and bottom faces
+        latent_codes: 隐式codes
+        pose: 姿态
+        beta: torch.zeros(1, 10).to(device)
+        models: load_lbs(checkpoints)
+        smpl_server: SMPL生成器
+        tfs_c_inv: data_body['tfs_c_inv'], shape=[24, 4, 4] bone transformation matrices
+
+    Returns:
+        all mesh
+    """
     vertices_top_T, vertices_bottom_T = vertices_Ts
     faces_top, faces_bottom = faces_garments
     latent_code_top, latent_code_bottom = latent_codes
@@ -187,6 +212,7 @@ def draping(vertices_Ts, faces_garments, latent_codes, pose, beta, models, smpl_
 
     body_mesh = trimesh.Trimesh(smpl_verts.squeeze().cpu().numpy(), smpl_server.faces)
 
+    # 为body及garments上色
     colors_f_body = np.ones((len(body_mesh.faces), 4))*np.array([255, 255, 255, 200])[np.newaxis,:]
     colors_f_top = np.ones((len(top_mesh.faces), 4))*np.array([160, 160, 255, 200])[np.newaxis,:]
     colors_f_bottom = np.ones((len(bottom_mesh.faces), 4))*np.array([100, 100, 100, 200])[np.newaxis,:]
